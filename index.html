@@ -642,18 +642,138 @@
         'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inp6aWd6eWx5cGlmam9rc2tlaGtuIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTIyODEzNDAsImV4cCI6MjA2Nzg1NzM0MH0.UjSODSs-tWPmXxKkyuaSIvSutx5dCnJsMhzslbFaBUg'
       );
 
-      document.getElementById('submitBtn').addEventListener('click', async (e) => {
+      const submitBtn = document.getElementById('submitBtn');
+      const jobId = new URLSearchParams(window.location.search).get('job_id');
+      let jobLineage = null;
+
+      function showFormMessage(message, type = 'warning') {
+        const messageEl = document.getElementById('formMessage');
+        messageEl.textContent = message;
+        messageEl.style.display = 'block';
+        messageEl.style.color = type === 'success' ? '#065f46' : '#92400e';
+        messageEl.style.background = type === 'success' ? '#d1fae5' : '#fef3c7';
+        messageEl.style.border = type === 'success' ? '1px solid #10b981' : '1px solid #f59e0b';
+      }
+
+      function firstValue(...values) {
+        return values.find((value) => typeof value === 'string' && value.trim())?.trim() || '';
+      }
+
+      function buildName(customer = {}) {
+        const firstLast = [customer.first_name, customer.last_name]
+          .filter((value) => typeof value === 'string' && value.trim())
+          .join(' ');
+
+        return firstValue(
+          customer.customer_name,
+          customer.name,
+          customer.full_name,
+          customer.company_name,
+          customer.company,
+          firstLast
+        );
+      }
+
+      function buildStreet(record = {}) {
+        return firstValue(
+          record.street,
+          record.street_address,
+          record.address,
+          record.address_line1,
+          record.property_address,
+          record.service_address,
+          [record.street1, record.street2].filter((value) => typeof value === 'string' && value.trim()).join(', ')
+        );
+      }
+
+      function buildCityZip(record = {}) {
+        return [record.city, record.state, record.zip, record.zip_code, record.postal_code]
+          .filter((value) => typeof value === 'string' && value.trim())
+          .join(' ');
+      }
+
+      function prefillJobDetails(customer, property) {
+        const customerName = buildName(customer);
+        const street = buildStreet(property) || buildStreet(customer);
+        const cityZip = buildCityZip(property) || buildCityZip(customer);
+
+        if (customerName) document.getElementById('customerName').value = customerName;
+        if (street) document.getElementById('street').value = street;
+        if (cityZip) document.getElementById('cityZip').value = cityZip;
+      }
+
+      async function loadJobContext() {
+        if (!jobId) {
+          submitBtn.disabled = true;
+          showFormMessage('This Hydrostatic Test must be opened from a Job Workspace before it can be submitted.');
+          return;
+        }
+
+        showFormMessage('Loading Job Workspace details...');
+
+        const { data: job, error: jobError } = await supabase
+          .from('jobs')
+          .select('id, organization_id, customer_id, property_id')
+          .eq('id', jobId)
+          .single();
+
+        if (jobError || !job) {
+          submitBtn.disabled = true;
+          showFormMessage('Unable to load the Job Workspace record for this Hydrostatic Test. Please reopen it from the job.');
+          return;
+        }
+
+        if (!job.organization_id || !job.customer_id || !job.property_id) {
+          submitBtn.disabled = true;
+          showFormMessage('This job is missing required organization, customer, or property lineage. The test cannot be submitted yet.');
+          return;
+        }
+
+        jobLineage = {
+          organization_id: job.organization_id,
+          job_id: job.id,
+          customer_id: job.customer_id,
+          property_id: job.property_id
+        };
+
+        const [customerResult, propertyResult] = await Promise.all([
+          supabase.from('customers').select('*').eq('id', job.customer_id).maybeSingle(),
+          supabase.from('properties').select('*').eq('id', job.property_id).maybeSingle()
+        ]);
+
+        prefillJobDetails(customerResult.data || {}, propertyResult.data || {});
+        submitBtn.disabled = false;
+        showFormMessage('Job loaded. This Hydrostatic Test will be saved to the Job Workspace record.', 'success');
+      }
+
+      loadJobContext();
+
+      submitBtn.addEventListener('click', async (e) => {
         e.preventDefault();
+
+        if (!jobLineage) {
+          showFormMessage('This Hydrostatic Test must be opened from a valid Job Workspace before it can be submitted.');
+          return;
+        }
+
+        submitBtn.disabled = true;
         const payload = {
+          organization_id: jobLineage.organization_id,
+          job_id: jobLineage.job_id,
+          customer_id: jobLineage.customer_id,
+          property_id: jobLineage.property_id,
           customer_name: document.getElementById('customerName').value,
           test_date: document.getElementById('testDate').value,
           technician_name: document.getElementById('technicianName').value,
           test_location: document.getElementById('street').value + ', ' + document.getElementById('cityZip').value,
-          // Add additional fields here if you want to send them to Supabase!
         };
         const { error } = await supabase.from('hydrostatic_tests').insert([payload]);
-        if (error) alert('Error: ' + error.message);
-        else alert('Submitted!');
+        if (error) {
+          submitBtn.disabled = false;
+          alert('Error: ' + error.message);
+        } else {
+          alert('Submitted!');
+        }
       });
     });
 
