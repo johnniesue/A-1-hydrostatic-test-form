@@ -639,12 +639,20 @@
       // --- SUPABASE LOGIC ---
       const supabase = window.supabase.createClient(
         'https://zzigzylypifjokskehkn.supabase.co',
-        'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inp6aWd6eWx5cGlmam9rc2tlaGtuIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTIyODEzNDAsImV4cCI6MjA2Nzg1NzM0MH0.UjSODSs-tWPmXxKkyuaSIvSutx5dCnJsMhzslbFaBUg'
+        'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inp6aWd6eWx5cGlmam9rc2tlaGtuIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTIyODEzNDAsImV4cCI6MjA2Nzg1NzM0MH0.UjSODSs-tWPmXxKkyuaSIvSutx5dCnJsMhzslbFaBUg',
+        {
+          auth: {
+            persistSession: true,
+            autoRefreshToken: true,
+            detectSessionInUrl: true,
+          },
+        }
       );
 
       const submitBtn = document.getElementById('submitBtn');
       const jobId = new URLSearchParams(window.location.search).get('job_id');
       let jobLineage = null;
+      let initialSessionPromise = null;
 
       function showFormMessage(message, type = 'warning') {
         const messageEl = document.getElementById('formMessage');
@@ -653,6 +661,61 @@
         messageEl.style.color = type === 'success' ? '#065f46' : '#92400e';
         messageEl.style.background = type === 'success' ? '#d1fae5' : '#fef3c7';
         messageEl.style.border = type === 'success' ? '1px solid #10b981' : '1px solid #f59e0b';
+      }
+
+      function waitForInitialSession(timeoutMs = 2000) {
+        if (initialSessionPromise) return initialSessionPromise;
+
+        initialSessionPromise = new Promise((resolve) => {
+          let settled = false;
+
+          const finish = (session) => {
+            if (settled) return;
+            settled = true;
+            resolve(session || null);
+          };
+
+          supabase.auth
+            .getSession()
+            .then(({ data }) => {
+              if (data?.session) finish(data.session);
+            })
+            .catch(() => {});
+
+          const { data: sub } = supabase.auth.onAuthStateChange((event, session) => {
+            if (event === 'INITIAL_SESSION') {
+              sub.subscription.unsubscribe();
+              finish(session);
+            }
+          });
+
+          setTimeout(() => {
+            try {
+              sub.subscription.unsubscribe();
+            } catch {}
+            finish(null);
+          }, timeoutMs);
+        });
+
+        return initialSessionPromise;
+      }
+
+      async function getStableSession(timeoutMs = 2000) {
+        const initial = await waitForInitialSession(timeoutMs);
+        if (initial) return initial;
+
+        const { data } = await supabase.auth.getSession();
+        return data?.session || null;
+      }
+
+      async function requireAuthenticatedSession() {
+        const session = await getStableSession();
+        if (!session?.access_token) return null;
+
+        const { data, error } = await supabase.auth.getUser();
+        if (error || !data?.user) return null;
+
+        return session;
       }
 
       function firstValue(...values) {
@@ -703,9 +766,18 @@
       }
 
       async function loadJobContext() {
+        submitBtn.disabled = true;
+
         if (!jobId) {
-          submitBtn.disabled = true;
           showFormMessage('This Hydrostatic Test must be opened from a Job Workspace before it can be submitted.');
+          return;
+        }
+
+        showFormMessage('Checking A-1 APSVC authentication...');
+        const session = await requireAuthenticatedSession();
+
+        if (!session) {
+          showFormMessage('Please sign in to the A-1 APSVC Dashboard, then reopen this Hydrostatic Test from the Job Workspace.');
           return;
         }
 
@@ -715,16 +787,14 @@
           .from('jobs')
           .select('id, organization_id, customer_id, property_id')
           .eq('id', jobId)
-          .single();
+          .maybeSingle();
 
         if (jobError || !job) {
-          submitBtn.disabled = true;
           showFormMessage('Unable to load the Job Workspace record for this Hydrostatic Test. Please reopen it from the job.');
           return;
         }
 
         if (!job.organization_id || !job.customer_id || !job.property_id) {
-          submitBtn.disabled = true;
           showFormMessage('This job is missing required organization, customer, or property lineage. The test cannot be submitted yet.');
           return;
         }
@@ -750,6 +820,13 @@
 
       submitBtn.addEventListener('click', async (e) => {
         e.preventDefault();
+
+        const session = await requireAuthenticatedSession();
+        if (!session) {
+          submitBtn.disabled = true;
+          showFormMessage('Please sign in to the A-1 APSVC Dashboard, then reopen this Hydrostatic Test from the Job Workspace.');
+          return;
+        }
 
         if (!jobLineage) {
           showFormMessage('This Hydrostatic Test must be opened from a valid Job Workspace before it can be submitted.');
